@@ -1,0 +1,35 @@
+# ── Experiment outputs ──────────────────────────
+results/
+detail_results/
+tool_results/
+demo/
+tool_eval/
+run_evolution.py
+run_evolution.sh
+# ── Logs ────────────────────────────────────────
+logs/
+
+
+# ── Lifelong library evolution snapshots ────────
+lifelong_library/
+lifelong_library/
+lifelong_library/
+
+# ── Baseline comparison code (separate repo) ───
+DEFEND/
+
+# ── Python ──────────────────────────────────────
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── OS / editor ─────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
