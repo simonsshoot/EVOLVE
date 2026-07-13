@@ -1,7 +1,11 @@
 # EVOLVE
 
 <p align="center">
-  <a href="figure/EVOLVE.pdf"><img src="https://img.shields.io/badge/logo-EVOLVE.pdf-blue" alt="EVOLVE logo"></a>
+  <img src="figure/EVOLVE.png" alt="EVOLVE logo" width="400">
+</p>
+
+<p align="center">
+  <em>Logo</em> · <a href="figure/EVOLVE.pdf">PDF version</a>
 </p>
 
 **EVOLVE** is a lifelong tool evolution framework for AI agent safety. As the agent encounters risky scenarios one by one, EVOLVE continuously (1) analyzes potential risks, (2) reuses / retrieves previously evolved security tools from a lifelong library, (3) generates new tools when none match, (4) fuses them with existing ones, (5) executes the tool to verify, and (6) audits the result to decide whether the tool should be kept. The library accumulates over time and improves both accuracy and efficiency on subsequent samples.
