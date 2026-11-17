@@ -46,6 +46,7 @@ class ToolSpec(BaseModel):
 class FinalDecisionOutput(BaseModel):
     is_safe: Literal["True", "False"] = Field(default="True", description='"True" if the request and agent actions are safe')
     reason: str = Field(default="", description="Reasoning for the decision")
+    applied_rules: List[str] = Field(default_factory=list, description="IDs ([R-xxx]) of the domain judgment rules the decision relied on; empty if none")
 
 
 def _failed_verdict(stage: str) -> Dict[str, Any]:
@@ -389,6 +390,7 @@ class AuditorAgent:
         # For the decision trace: how this verdict was reached.
         self.decision_source = ""
         self.final_decision_reason = ""
+        self.final_decision_applied_rules: List[str] = []
 
         for item in doubt_tool_result:
             tool_info = item[0]
@@ -489,6 +491,7 @@ class AuditorAgent:
         self.verdict_failed = decision is None
         self.decision_source = "final_decision"
         self.final_decision_reason = clean_response.get("reason", "")
+        self.final_decision_applied_rules = list(decision.applied_rules) if decision else []
         self.logger.info(
             f"Doubt Decision Result: {json.dumps(clean_response, ensure_ascii=False)}"
         )

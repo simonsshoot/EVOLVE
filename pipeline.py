@@ -36,6 +36,8 @@ from agents.fusionagent import FusionAgent
 from agents.executoragent import ExecutorAgent
 from agents.auditoragent import AuditorAgent
 from agents.revisionagent import RevisionAgent
+from agents.ruleevolutionagent import RuleEvolutionAgent
+import rule_library
 
 logger = setup_logger("pipeline")
 
@@ -263,6 +265,7 @@ def build_decision_trace(
         "verdict_failed": bool(getattr(auditoragent, "verdict_failed", False)),
         "decision_source": getattr(auditoragent, "decision_source", ""),
         "final_decision_reason": getattr(auditoragent, "final_decision_reason", ""),
+        "applied_rules": list(getattr(auditoragent, "final_decision_applied_rules", [])),
         "hit_tools": [t["tool_name"] for t in tools if t["execution_result"] is True],
         "simulated_hits": [
             t["tool_name"]
@@ -427,6 +430,9 @@ def run(args: argparse.Namespace):
         cache_dir=getattr(args, "llm_cache_dir", None),
         enabled=not getattr(args, "disable_llm_cache", False),
     )
+    # 规则库：种子规则 + 本次运行进化出的规则（误判触发 RuleEvolutionAgent）
+    rule_library.configure(getattr(args, "rule_memory", None))
+    rule_evol_agent = RuleEvolutionAgent(args.auditor_model)
     # ----------------- merged splits support -----------------
     data, dataset_name = data_reader(args)
     args.dataset = dataset_name
@@ -455,6 +461,8 @@ def run(args: argparse.Namespace):
 
     if args.restart:
         restart(result_path, args.tool_memory, args.risk_memory, args.dataset)
+        if os.path.exists(getattr(args, "rule_memory", "") or ""):
+            os.remove(args.rule_memory)
     if os.path.exists(result_path):
         existing_df = pd.read_csv(result_path)
         df = existing_df
@@ -661,6 +669,24 @@ def run(args: argparse.Namespace):
                     doubt_tool_result=doubt_tool_result,
                     action_result=final_result,
                 )
+
+                # 误判触发规则进化：提炼本应纠正判定的规则，写入规则库
+                expected_decision = "safe" if label_val == 1 else "unsafe"
+                if decision not in ("error", expected_decision):
+                    try:
+                        rule_evol_agent.evolve(
+                            agent_dataset,
+                            tarvodata,
+                            label_val,
+                            decision,
+                            reason=tarvodata.get("decision_trace", {}).get(
+                                "final_decision_reason", ""
+                            ),
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error in rule evolution for item {index}: {str(e)}"
+                        )
             df.to_csv(result_path, index=False)
 
         except Exception as e:
@@ -708,6 +734,12 @@ if __name__ == "__main__":
         "--tool_memory",
         type=str,
         default="lifelong_library/safety_tools_agentharm_new.json",
+    )
+    parser.add_argument(
+        "--rule_memory",
+        type=str,
+        default="lifelong_library/rules_memory.json",
+        help="Evolved judgment rules (seeded from prompts/seed_rules.json, appended on misjudgments).",
     )
     parser.add_argument("--simulate_model", type=str, default="deepseek-chat")
 
