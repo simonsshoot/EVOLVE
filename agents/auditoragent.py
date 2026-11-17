@@ -15,15 +15,7 @@ from prompts.prompt_utils import compose_prompt, get_specific_prompt_supplement
 from langchain_core.prompts import ChatPromptTemplate
 from agent import BaseAgent
 from llm_cache import cached_chain
-
-
-class ToolMemoryRepository:
-    def __init__(self, tool_memory_path: str):
-        self.tool_memory_path = tool_memory_path
-
-    def load(self) -> Dict[str, Any]:
-        with open(self.tool_memory_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+from tool_index import CategoryAlias, ToolIndex, default_alias_path
 
 
 class DoubtReviewOutput(BaseModel):
@@ -65,8 +57,12 @@ class AuditorAgent:
         tool_memory_path: str,
         audit_model: str = "deepseek-chat",
         dataset: str = "",
+        alias_path: str = "",
     ):
-        self.tool_repo = ToolMemoryRepository(tool_memory_path)
+        self.tool_index = ToolIndex(
+            tool_memory_path,
+            alias=CategoryAlias(alias_path or default_alias_path(tool_memory_path)),
+        )
         base_agent = BaseAgent(audit_model, logger="auditor_agent_logger")
         self.logger = base_agent.logger
         self.agent = base_agent.initagent()
@@ -114,12 +110,15 @@ class AuditorAgent:
         )
 
     def search_original_tool(self, optimized_tool: Dict[str, Any]) -> Dict[str, Any]:
-        tool_memory = self.tool_repo.load()
-        category_tool_set = optimized_tool.get("category", "")
-        for tool in tool_memory.get(category_tool_set, []):
-            if tool.get("tool_name") == optimized_tool.get("tool_name"):
-                return tool
-        return {}
+        # 规范化 + 别名解析后按 (category, tool_name) 找回库中的原工具
+        found = self.tool_index.find_tool(
+            optimized_tool.get("category", ""),
+            optimized_tool.get("tool_name", ""),
+        )
+        if found is None:
+            return {}
+        tool, _category_key = found
+        return tool
 
     def _invoke_structured(self, chain, prompt: str, default_value, err_msg: str):
         try:

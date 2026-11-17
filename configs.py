@@ -7,7 +7,7 @@ DEFAULT_MAX_TOKENS = 2048
 DEFAULT_TEMPERATURE = 0.0
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_BASE_URL = "https://api.zhizengzeng.com/v1"

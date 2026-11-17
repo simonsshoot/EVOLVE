@@ -137,9 +137,9 @@ TOOL_SEARCH_PROMPT = """You are a retrieval expert responsible for searching the
 
 User Tools: {user_tools}
 
-Existing Tools: {existing_tools}
+Retrieved Candidate Tools (the only existing tools you may match against): {existing_tools}
 
-For each tool, you should return the most similar tool from the existing tools. If there is a match, if_match should be "yes" and match_tool_name should be the name of the similar tool; if not, if_match should be "no" and match_tool_name should be "".
+For each user tool, decide whether one of the retrieved candidate tools is similar enough to be reused. If there is a match, if_match should be "yes" and match_tool_name must be exactly the tool_name of one of the retrieved candidates; if none is similar enough, if_match should be "no" and match_tool_name should be "".
 
 Return every user tool with all of its original fields (category, tool_name, tool_description, require, tool_code), plus if_match and match_tool_name.
 """

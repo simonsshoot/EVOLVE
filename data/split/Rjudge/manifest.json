@@ -1,0 +1,87 @@
+{
+ "source": "data/R-Judge (arXiv 2401.10019, EMNLP Findings 2024; test-only benchmark, no official split)",
+ "seed": 44,
+ "ratios": {
+  "train": 0.7,
+  "val": 0.1,
+  "test": 0.2
+ },
+ "stratify_by": [
+  "domain",
+  "label",
+  "attack_type"
+ ],
+ "total": 571,
+ "counts": {
+  "train": 402,
+  "val": 56,
+  "test": 113
+ },
+ "distribution": {
+  "train": {
+   "Application/benign/injection": 56,
+   "Application/benign/unintended": 13,
+   "Application/harmful/injection": 93,
+   "Application/harmful/unintended": 16,
+   "Finance/benign/injection": 57,
+   "Finance/benign/unintended": 4,
+   "Finance/harmful/injection": 19,
+   "Finance/harmful/unintended": 8,
+   "IoT/benign/unintended": 8,
+   "IoT/harmful/unintended": 13,
+   "Program/benign/injection": 32,
+   "Program/benign/unintended": 10,
+   "Program/harmful/injection": 24,
+   "Program/harmful/unintended": 25,
+   "Web/benign/injection": 4,
+   "Web/benign/unintended": 6,
+   "Web/harmful/injection": 4,
+   "Web/harmful/unintended": 10
+  },
+  "val": {
+   "Application/benign/injection": 8,
+   "Application/benign/unintended": 2,
+   "Application/harmful/injection": 13,
+   "Application/harmful/unintended": 2,
+   "Finance/benign/injection": 8,
+   "Finance/harmful/injection": 3,
+   "Finance/harmful/unintended": 1,
+   "IoT/benign/unintended": 1,
+   "IoT/harmful/unintended": 2,
+   "Program/benign/injection": 5,
+   "Program/benign/unintended": 1,
+   "Program/harmful/injection": 3,
+   "Program/harmful/unintended": 3,
+   "Web/benign/injection": 1,
+   "Web/benign/unintended": 1,
+   "Web/harmful/injection": 1,
+   "Web/harmful/unintended": 1
+  },
+  "test": {
+   "Application/benign/injection": 16,
+   "Application/benign/unintended": 2,
+   "Application/harmful/injection": 27,
+   "Application/harmful/unintended": 4,
+   "Finance/benign/injection": 17,
+   "Finance/benign/unintended": 1,
+   "Finance/harmful/injection": 5,
+   "Finance/harmful/unintended": 3,
+   "IoT/benign/unintended": 2,
+   "IoT/harmful/unintended": 4,
+   "Program/benign/injection": 9,
+   "Program/benign/unintended": 3,
+   "Program/harmful/injection": 7,
+   "Program/harmful/unintended": 6,
+   "Web/benign/injection": 1,
+   "Web/benign/unintended": 2,
+   "Web/harmful/injection": 1,
+   "Web/harmful/unintended": 3
+  }
+ },
+ "duplicate_groups_kept_together": 3,
+ "notes": [
+  "label field in records: 0=benign/safe, 1=harmful/unsafe (R-Judge convention)",
+  "records stored verbatim; 'category' added = source domain (Application/Program/IoT/Finance/Web)",
+  "shared user-instruction templates across records are the benchmark's design (same instruction, different agent behavior/label) and are NOT grouped"
+ ]
+}

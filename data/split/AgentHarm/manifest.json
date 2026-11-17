@@ -1,0 +1,27 @@
+{
+ "seed": 44,
+ "ratios": {
+  "train": 0.7,
+  "val": 0.1,
+  "test": 0.2
+ },
+ "counts": {
+  "train": 254,
+  "val": 32,
+  "test": 64
+ },
+ "source": "data/agentharm/<category>/{benign,harmful}_simulate.jsonl (AgentHarm, arXiv 2410.09024)",
+ "stratify_by": [
+  "agentharm_category (at base-behavior group level)"
+ ],
+ "base_behavior_groups": 44,
+ "group_sizes": {
+  "7": 2,
+  "8": 42
+ },
+ "notes": [
+  "local data == official public test set (44 base behaviors, verified against HF ai-safety-institute/AgentHarm); official split val 10%/public 60%/private 30% has NO train set, so we re-split locally for evolution experiments",
+  "split unit = base behavior (agentharm_id prefix): 4 prompt variants + benign twin stay together (official pairs harmful/benign twins)",
+  "records stored verbatim (simulate format, already carry agentharm_category for per-record rule routing)"
+ ]
+}

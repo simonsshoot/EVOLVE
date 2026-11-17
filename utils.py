@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import json
-import tempfile
+import random
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 import argparse
 
-from agents.agent_utils import normalize_is_safe
+from agents.agent_utils import normalize_is_safe, atomic_write_json
+from tool_index import CategoryAlias, default_alias_path, resolve_key
 from configs import setup_logger
 
 logger = setup_logger("pipeline")
@@ -18,6 +19,31 @@ BASE_DIR = Path(__file__).resolve().parent
 
 def _data_path(*parts: str) -> str:
     return str(BASE_DIR.joinpath("data", *parts))
+
+
+def _resolve_generated_split(data_type: str):
+    """解析 script/split_datasets.py 生成的划分集名称。
+
+    支持的名称（可加 _shuffled 后缀，加载后用 seed 44 洗牌）：
+    - asb_train / asb_val / asb_test            -> data/split/ASB/<name>.json
+    - agentharm_train / agentharm_val / agentharm_test -> data/split/AgentHarm/<name>.json
+    - assebench_{safety,security}_{train,val,test} -> data/split/ASSEBench/<subset>/<name>.json
+
+    返回 (相对 data/ 的路径部件列表, 是否洗牌)；非划分集名称返回 None。
+    """
+    core = data_type
+    shuffled = core.endswith("_shuffled")
+    if shuffled:
+        core = core[: -len("_shuffled")]
+    for bench, folder in (("asb", "ASB"), ("agentharm", "AgentHarm")):
+        for part in ("train", "val", "test"):
+            if core == f"{bench}_{part}":
+                return ["split", folder, f"{part}.json"], shuffled
+    for subset in ("safety", "security"):
+        for part in ("train", "val", "test"):
+            if core == f"assebench_{subset}_{part}":
+                return ["split", "ASSEBench", subset, f"{part}.json"], shuffled
+    return None
 
 
 def read_simulated_data(data_type: str) -> List[Dict[str, Any]]:
@@ -33,6 +59,10 @@ def read_simulated_data(data_type: str) -> List[Dict[str, Any]]:
         or data_type == "assebench"
         or data_type.startswith("assebench_")
     ):
+        return read_data(data_type)
+
+    # 划分集（script/split_datasets.py 生成）已是管线消费格式，统一走 read_data
+    if _resolve_generated_split(data_type):
         return read_data(data_type)
 
     agentharm_categories = [
@@ -131,6 +161,44 @@ def read_data(data_type: str):
             if isinstance(data, dict) and "behaviors" in data:
                 data = data["behaviors"]
             return data
+
+    # 支持 R-Judge 划分集读取（script/split_rjudge.py 生成）
+    # 格式: rjudge_train / rjudge_val / rjudge_test -> data/split/Rjudge/<name>.json
+    # 后缀 _shuffled 表示加载后用固定 seed 洗牌（进化实验的随机样本流）
+    if data_type.startswith("rjudge_"):
+        split_name = data_type[len("rjudge_"):]
+        shuffled = split_name.endswith("_shuffled")
+        if shuffled:
+            split_name = split_name[: -len("_shuffled")]
+        split_path = _data_path("split", "Rjudge", f"{split_name}.json")
+        if os.path.exists(split_path):
+            with open(split_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if shuffled:
+                random.Random(44).shuffle(data)
+            wrapped_data = []
+            for item in data:
+                wrapped_data.append(data_wrapper(item, data_type))
+            return wrapped_data
+
+    # 支持 ASB / AgentHarm / ASSEBench 划分集读取（script/split_datasets.py 生成）
+    # 格式: asb_train / agentharm_train / assebench_{safety,security}_train 等，
+    # 可加 _shuffled 后缀（加载后用固定 seed 洗牌）。
+    # ASB / AgentHarm 划分集保存的就是 simulate 格式（request/labels/agent_actions），
+    # 直接透传；ASSEBench 划分集为原始交互记录，走 assebench 包装。
+    _gen = _resolve_generated_split(data_type)
+    if _gen:
+        rel_parts, shuffled = _gen
+        split_path = _data_path(*rel_parts)
+        if not os.path.exists(split_path):
+            raise FileNotFoundError(f"Generated split file not found: {split_path}")
+        with open(split_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if shuffled:
+            random.Random(44).shuffle(data)
+        if data_type.startswith("assebench_"):
+            return [data_wrapper(item, "assebench") for item in data]
+        return data
 
     # 支持 R-Judge 按子文件夹读取
     # 格式: rjudge_<subfolder>_harmful 或 rjudge_<subfolder>_benign
@@ -440,6 +508,8 @@ def data_wrapper(data: Dict[str, Any], agent_type: str) -> Dict[str, Any]:
 
         # 保留 ASSEBench 原始信息
         target_data["assebench_id"] = data.get("id")
+        # 划分集（assebench_safety/security_train...）按记录路由域规则用
+        target_data["assebench_category"] = data.get("category", "")
         target_data["assebench_profile"] = data.get("profile", "")
         target_data["assebench_application_scenario"] = data.get(
             "application_scenario", ""
@@ -544,24 +614,41 @@ def filter_by_id_prefix(input_file: str, output_file: str):
     )
 
 
-def atomic_write_json(path: str, obj: Any) -> None:
-    """Atomically write obj as JSON: dump to a temp file in the same directory, then rename.
+def _migrate_library_keys(
+    library: Dict[str, Any], alias: CategoryAlias, merge_lists: bool
+) -> Dict[str, Any]:
+    """Re-key a library to canonical (normalized + alias-folded) category keys.
 
-    A crash mid-write must never corrupt the lifelong library, so the target file is
-    only ever replaced by a complete rename (os.replace is atomic on POSIX and Windows).
+    Old libraries keep readable keys ("Physical Injury"); migration folds them to
+    canonical form while preserving the readable label inside each record, and
+    merges list values by tool_name when two old keys collapse into one.
     """
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix=".evolve_tmp_", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+    migrated: Dict[str, Any] = {}
+    for old_key, value in library.items():
+        key = resolve_key(migrated, alias, old_key)
+        if key in migrated:
+            if (
+                merge_lists
+                and isinstance(migrated[key], list)
+                and isinstance(value, list)
+            ):
+                seen = {
+                    t.get("tool_name")
+                    for t in migrated[key]
+                    if isinstance(t, dict)
+                }
+                migrated[key].extend(
+                    t
+                    for t in value
+                    if not (isinstance(t, dict) and t.get("tool_name") in seen)
+                )
+            continue
+        migrated[key] = value
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    item.setdefault("category", old_key)
+    return migrated
 
 
 def update_lifelong_library(
@@ -581,6 +668,11 @@ def update_lifelong_library(
       这里的“最终 risky”以 doubt_tool_result 中的 risky_tool/tool_has_risk 标志为准。
     """
     # ── Risk library update ────────────────────────────────────────────────
+    # 类目规范化：键折叠为规范形式（小写/下划线），可读标签保留在值里；
+    # 变体类目经别名表折叠到已入库类目，避免近重复类目分裂增长
+    alias = CategoryAlias(
+        getattr(args, "category_alias_path", "") or default_alias_path(args.tool_memory)
+    )
     try:
         with open(args.risk_memory, "r", encoding="utf-8") as f:
             risk_library = json.load(f)
@@ -590,15 +682,19 @@ def update_lifelong_library(
             category = risk.get("category")
             description = risk.get("description")
 
-            if category and category.strip() and category not in risk_library:
-                risk_library[category] = {
-                    "category": category,
+            if not (category and category.strip()):
+                continue
+            key = resolve_key(risk_library, alias, category)
+            if key not in risk_library:
+                risk_library[key] = {
+                    "category": category.strip(),
                     "description": description,
                 }
                 logger.info(f"Added new risk category: {category}")
                 added_any = True
 
         if added_any:
+            risk_library = _migrate_library_keys(risk_library, alias, merge_lists=False)
             # 原子写：中途崩溃不会损坏风险库
             atomic_write_json(args.risk_memory, risk_library)
     except Exception as e:
@@ -639,11 +735,14 @@ def update_lifelong_library(
             if not category:
                 continue
 
-            if category not in tool_library:
-                tool_library[category] = []
+            key = resolve_key(tool_library, alias, category)
+
+            if key not in tool_library:
+                tool_library[key] = []
 
             tool_data = {
                 "tool_name": tool_name,
+                "category": category,
                 "tool_description": tool_info.get("tool_description", ""),
                 "require": tool_info.get("require", []),
                 "tool_code": tool_info.get("tool_code", ""),
@@ -652,24 +751,25 @@ def update_lifelong_library(
 
             if is_reused:
                 found = False
-                for i, existing_tool in enumerate(tool_library[category]):
+                for i, existing_tool in enumerate(tool_library[key]):
                     if existing_tool.get("tool_name") == tool_name:
-                        tool_library[category][i] = tool_data
+                        tool_library[key][i] = tool_data
                         found = True
                         updated = True
                         break
                 if not found:
-                    tool_library[category].append(tool_data)
+                    tool_library[key].append(tool_data)
                     updated = True
             else:
                 exists = any(
-                    t.get("tool_name") == tool_name for t in tool_library[category]
+                    t.get("tool_name") == tool_name for t in tool_library[key]
                 )
                 if not exists:
-                    tool_library[category].append(tool_data)
+                    tool_library[key].append(tool_data)
                     updated = True
 
         if updated:
+            tool_library = _migrate_library_keys(tool_library, alias, merge_lists=True)
             # 原子写：中途崩溃不会损坏工具库
             atomic_write_json(args.tool_memory, tool_library)
             logger.info("Tool library updated successfully")

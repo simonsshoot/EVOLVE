@@ -63,7 +63,14 @@ class AnalysisAgent(BaseAgent):
 
     def _load_risk_memory(self) -> Dict[str, Any]:
         with open(self.risk_memory_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
+        # 库内键是折叠后的规范形式（如 physical_injury）；注入提示词时用记录里
+        # 保留的可读标签（如 Physical Injury）作为展示键，保持提示词可读
+        display: Dict[str, Any] = {}
+        for key, value in raw.items():
+            label = value.get("category") if isinstance(value, dict) else None
+            display.setdefault(label or key, value)
+        return display
 
     def risk_analysis(
         self, request: str, agent_actions: str, risk_categories: str

@@ -335,6 +335,16 @@ def pipeline(args: argparse.Namespace, data: Dict[str, Any]) -> Tuple[
         category = tarvodata.get("agentharm_category") or tarvodata.get("category")
         if isinstance(category, str) and category.strip():
             agent_dataset = f"agentharm_{category.strip()}"
+    elif str(args.dataset).startswith("rjudge"):
+        # 划分集（rjudge_train/val/test）混合了多个域；按记录的 category 路由域规则
+        category = tarvodata.get("rjudge_category") or data.get("category")
+        if isinstance(category, str) and category.strip():
+            agent_dataset = f"rjudge_{category.strip()}"
+    elif str(args.dataset).startswith("assebench"):
+        # 划分集（assebench_safety/security_train...）混合多个场景；按记录 category 路由
+        category = tarvodata.get("assebench_category") or data.get("category")
+        if isinstance(category, str) and category.strip():
+            agent_dataset = f"assebench_{category.strip()}"
 
     # Step 2: AnalysisAgent - 风险分析与工具生成
     analysisagent = AnalysisAgent(
@@ -345,7 +355,15 @@ def pipeline(args: argparse.Namespace, data: Dict[str, Any]) -> Tuple[
     tool_results, risk_analysis = analysisagent.analysis(args, tarvodata, present_tools)
 
     # Step 3: FusionAgent - 工具搜索、复用
-    fusionagent = FusionAgent(args.tool_memory, fusion_model=args.fusion_model)
+    # 两阶段检索：一阶段 embedding 召回 top-K 候选（无 embedding 后端时词法回退），
+    # 二阶段 LLM 在候选内确认匹配；跨类目匹配学习持久别名表
+    fusionagent = FusionAgent(
+        args.tool_memory,
+        fusion_model=args.fusion_model,
+        embedding_model=getattr(args, "embedding_model", "text-embedding-3-small"),
+        recall_k=getattr(args, "recall_k", 5),
+        alias_path=getattr(args, "category_alias_path", "") or None,
+    )
     try:
         clean_relevant_tools = fusionagent.search_tool(tool_results)
     except Exception as e:
@@ -461,7 +479,10 @@ def run(args: argparse.Namespace):
 
     if args.restart:
         restart(result_path, args.tool_memory, args.risk_memory, args.dataset)
-        if os.path.exists(getattr(args, "rule_memory", "") or ""):
+        # 评估模式（--no_rule_evolution）下规则库是冻结资产，restart 不得删除
+        if not getattr(args, "no_rule_evolution", False) and os.path.exists(
+            getattr(args, "rule_memory", "") or ""
+        ):
             os.remove(args.rule_memory)
     if os.path.exists(result_path):
         existing_df = pd.read_csv(result_path)
@@ -553,6 +574,16 @@ def run(args: argparse.Namespace):
                 )
                 if isinstance(category, str) and category.strip():
                     agent_dataset = f"agentharm_{category.strip()}"
+            elif str(args.dataset).startswith("rjudge"):
+                # 划分集（rjudge_train/val/test）混合了多个域；按记录的 category 路由
+                category = tarvodata.get("rjudge_category") or data.get("category")
+                if isinstance(category, str) and category.strip():
+                    agent_dataset = f"rjudge_{category.strip()}"
+            elif str(args.dataset).startswith("assebench"):
+                # 划分集（assebench_safety/security_train...）按记录 category 路由
+                category = tarvodata.get("assebench_category") or data.get("category")
+                if isinstance(category, str) and category.strip():
+                    agent_dataset = f"assebench_{category.strip()}"
 
             doubtagent_for_check = AuditorAgent(
                 tool_memory_path=args.tool_memory,
@@ -671,8 +702,12 @@ def run(args: argparse.Namespace):
                 )
 
                 # 误判触发规则进化：提炼本应纠正判定的规则，写入规则库
+                # （--no_rule_evolution 冻结规则库，用于 held-out 评估）
                 expected_decision = "safe" if label_val == 1 else "unsafe"
-                if decision not in ("error", expected_decision):
+                if (
+                    decision not in ("error", expected_decision)
+                    and not getattr(args, "no_rule_evolution", False)
+                ):
                     try:
                         rule_evol_agent.evolve(
                             agent_dataset,
@@ -741,7 +776,32 @@ if __name__ == "__main__":
         default="lifelong_library/rules_memory.json",
         help="Evolved judgment rules (seeded from prompts/seed_rules.json, appended on misjudgments).",
     )
+    parser.add_argument(
+        "--no_rule_evolution",
+        action="store_true",
+        help="Freeze the rule library (held-out evaluation: no rules are appended on misjudgments).",
+    )
     parser.add_argument("--simulate_model", type=str, default="deepseek-chat")
+
+    # 两阶段检索参数：一阶段 embedding 召回（无后端自动回退词法打分）
+    parser.add_argument(
+        "--embedding_model",
+        type=str,
+        default=os.environ.get("EVOLVE_EMBEDDING_MODEL", "text-embedding-3-small"),
+        help="Embedding model for stage-1 tool recall; empty string forces lexical scoring.",
+    )
+    parser.add_argument(
+        "--recall_k",
+        type=int,
+        default=5,
+        help="How many stored tools to recall per planned tool in stage 1.",
+    )
+    parser.add_argument(
+        "--category_alias_path",
+        type=str,
+        default="",
+        help="Persisted category alias table; empty = category_aliases.json next to tool_memory.",
+    )
 
     # 新版链路参数（默认值与旧版保持一致）
     parser.add_argument("--analysis_model", type=str, default="deepseek-chat")

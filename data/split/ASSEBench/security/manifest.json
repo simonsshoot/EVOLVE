@@ -1,0 +1,22 @@
+{
+ "seed": 44,
+ "ratios": {
+  "train": 0.7,
+  "val": 0.1,
+  "test": 0.2
+ },
+ "counts": {
+  "train": 576,
+  "val": 80,
+  "test": 161
+ },
+ "source": "data/ASSEBench/dataset/AgentJudge-security.json (= the 12 scenario files under data/ASSEBench/split/)",
+ "stratify_by": [
+  "application_scenario",
+  "label"
+ ],
+ "notes": [
+  "records stored verbatim + 'category' = scenario split-file stem (seed_rules domain key, e.g. Security_Operations_System_Misuse)",
+  "shared contents with the safety dimension ride with this dimension's stratification"
+ ]
+}

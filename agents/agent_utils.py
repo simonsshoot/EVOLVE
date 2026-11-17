@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import tempfile
 from typing import List, Dict, Any, Tuple
 
 
@@ -9,6 +11,37 @@ def normalize_is_safe(value) -> bool:
     if isinstance(value, str):
         return value.lower() in ["true", "1", "yes", "True"]
     return False
+
+
+def normalize_category(name: str) -> str:
+    """Fold a risk-category label to its canonical key form.
+
+    "Prompt Injection" / "prompt-injection" / "  PROMPT_INJECTION " all fold to
+    "prompt_injection", so library lookups and dedup survive label variants.
+    The readable label is preserved separately inside library records.
+    """
+    s = re.sub(r"[\s\-]+", "_", (name or "").strip().lower())
+    return re.sub(r"_+", "_", s).strip("_")
+
+
+def atomic_write_json(path: str, obj: Any) -> None:
+    """Atomically write obj as JSON: dump to a temp file in the same directory, then rename.
+
+    A crash mid-write must never corrupt the lifelong library, so the target file is
+    only ever replaced by a complete rename (os.replace is atomic on POSIX and Windows).
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".evolve_tmp_", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def parse_json_with_retry(

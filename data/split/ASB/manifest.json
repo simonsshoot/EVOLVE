@@ -1,0 +1,22 @@
+{
+ "seed": 44,
+ "ratios": {
+  "train": 0.7,
+  "val": 0.1,
+  "test": 0.2
+ },
+ "counts": {
+  "train": 42,
+  "val": 6,
+  "test": 12
+ },
+ "source": "data/ASB/{benign,harmful}_simulate.jsonl (Agent-SafetyBench, arXiv 2412.14470; evaluation benchmark, no official split; local 60-record subset)",
+ "stratify_by": [
+  "labels"
+ ],
+ "duplicate_groups_kept_together": 2,
+ "notes": [
+  "records stored verbatim (simulate format) + 'category' = primary risk type",
+  "agentsafebench_failure_modes kept verbatim (list) for analysis"
+ ]
+}

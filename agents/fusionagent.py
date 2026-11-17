@@ -1,12 +1,17 @@
 import json
-from functools import lru_cache
-from pathlib import Path
 from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent import BaseAgent
 from llm_cache import cached_chain
+from tool_index import (
+    CategoryAlias,
+    ToolIndex,
+    default_alias_path,
+    default_embedder,
+)
+from agents.agent_utils import normalize_category
 from prompts.base_prompts import (
     TOOL_SEARCH_PROMPT,
     TOOL_REUSE_PROMPT,
@@ -19,8 +24,8 @@ class ToolItem(BaseModel):
     tool_description: str = Field(default="", description="What the tool detects and how")
     require: List[str] = Field(default_factory=list, description="Python modules the code imports, e.g. ['re']")
     tool_code: str = Field(default="", description="Python source of def <tool_name>(query: str, action: str) -> bool; True = risk detected")
-    if_match: Literal["yes", "no"] = Field(default="no", description='"yes" if a similar tool exists among the existing tools')
-    match_tool_name: Optional[str] = Field(default=None, description='Name of the matched existing tool; "" if none')
+    if_match: Literal["yes", "no"] = Field(default="no", description='"yes" if a similar tool exists among the retrieved candidates')
+    match_tool_name: Optional[str] = Field(default=None, description='Name of the matched candidate tool; "" if none')
 
 
 class ToolBatch(BaseModel):
@@ -35,23 +40,32 @@ class ReusedTool(BaseModel):
     tool_code: str = Field(default="", description="Python source of def <tool_name>(query: str, action: str) -> bool; True = risk detected")
 
 
-class ToolMemoryRepository:
-    def __init__(self, tool_memory_path: str):
-        self.tool_memory_path = Path(tool_memory_path)
-
-    def load(self) -> Dict[str, Any]:
-        with self.tool_memory_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-
-    def load_relevant_tools(self, tool_result: Dict[str, Any]) -> Dict[str, Any]:
-        tool_memory = self.load()
-        categories = [t.get("category") for t in tool_result.get("tools", [])]
-        return {cat: tool_memory[cat] for cat in categories if cat in tool_memory}
+def _tool_text(tool: Dict[str, Any]) -> str:
+    """Embedding query/doc text for a tool: category | name: description."""
+    return "%s | %s: %s" % (
+        tool.get("category", ""),
+        tool.get("tool_name", ""),
+        tool.get("tool_description", ""),
+    )
 
 
 class FusionAgent:
-    def __init__(self, tool_memory_path: str, fusion_model: str = "deepseek-chat"):
-        self.tool_repo = ToolMemoryRepository(tool_memory_path)
+    def __init__(
+        self,
+        tool_memory_path: str,
+        fusion_model: str = "deepseek-chat",
+        embedding_model: str = "text-embedding-3-small",
+        recall_k: int = 5,
+        alias_path: str = "",
+        embed_fn=None,
+    ):
+        # 两阶段检索：一阶段 embedding 召回 top-K（无后端时词法回退），二阶段 LLM 在候选内确认
+        self.tool_index = ToolIndex(
+            tool_memory_path,
+            alias=CategoryAlias(alias_path or default_alias_path(tool_memory_path)),
+            embedder=(embed_fn, "injected") if embed_fn is not None else default_embedder(embedding_model),
+            recall_k=recall_k,
+        )
         self.agent = BaseAgent(fusion_model, logger="fusion_agent_logger").initagent()
 
         self.search_prompt = ChatPromptTemplate.from_template(TOOL_SEARCH_PROMPT)
@@ -70,12 +84,26 @@ class FusionAgent:
         if not tool_result.get("tools"):
             return ToolBatch()
 
-        relevant_tools = self.tool_repo.load_relevant_tools(tool_result)
+        # Stage 1: 每个待定工具从库内召回 top-K 相似工具（跨类目）
+        queries = [_tool_text(t) for t in tool_result["tools"]]
+        recalled = self.tool_index.recall(queries)
+        candidates: Dict[str, List[Dict[str, Any]]] = {}
+        seen = set()
+        for records in recalled:
+            for tool in records:
+                cat = tool.get("category", "")
+                dedup = (normalize_category(cat), tool.get("tool_name", ""))
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                candidates.setdefault(cat, []).append(tool)
+
+        # Stage 2: LLM 只在召回候选内做匹配确认
         return self.search_chain.invoke(
             {
                 "user_tools": json.dumps(tool_result, ensure_ascii=False, indent=2),
                 "existing_tools": json.dumps(
-                    relevant_tools, ensure_ascii=False, indent=2
+                    candidates, ensure_ascii=False, indent=2
                 ),
             }
         )
@@ -83,7 +111,6 @@ class FusionAgent:
     def reuse_tool(
         self, clean_relevant_tools: ToolBatch
     ) -> List[tuple[Dict[str, Any], bool]]:
-        tool_memory = self.tool_repo.load()
         tool_workflow: List[tuple[Dict[str, Any], bool]] = []
         if not clean_relevant_tools.tools or len(clean_relevant_tools.tools) == 0:
             return tool_workflow
@@ -99,17 +126,19 @@ class FusionAgent:
             if str(match_flag).lower() != "yes":
                 tool_workflow.append((tool_data, False))
                 continue
-            matched_tool_info = None
-            category = tool_data.get("category", "")
             matched = tool_data.get("match_tool_name")
-            if category in tool_memory:
-                for cate_tool in tool_memory[category]:
-                    if cate_tool.get("tool_name") == matched:
-                        matched_tool_info = cate_tool
-                        break
-            if matched_tool_info is None:
+            found = (
+                self.tool_index.find_tool(tool_data.get("category", ""), matched)
+                if matched
+                else None
+            )
+            if found is None:
                 tool_workflow.append((tool_data, False))
                 continue
+            matched_tool_info, matched_key = found
+            # 跨类目匹配：把变体类目折叠到已入库类目（写入持久别名表）
+            if normalize_category(tool_data.get("category", "")) != normalize_category(matched_key):
+                self.tool_index.learn_alias(tool_data.get("category", ""), matched_key)
             optimized = self.reuse_chain.invoke(
                 {
                     "user_tool": json.dumps(tool_data, ensure_ascii=False, indent=2),
@@ -124,7 +153,7 @@ class FusionAgent:
             else:
                 reused = optimized.model_dump()
             # The library update replaces the tool by (category, tool_name).
-            reused["category"] = category
+            reused["category"] = matched_tool_info.get("category") or matched_key
             reused["tool_name"] = reused.get("tool_name") or matched
             tool_workflow.append((reused, True))
         return tool_workflow

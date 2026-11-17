@@ -1,0 +1,23 @@
+{
+ "seed": 44,
+ "ratios": {
+  "train": 0.7,
+  "val": 0.1,
+  "test": 0.2
+ },
+ "counts": {
+  "train": 1028,
+  "val": 148,
+  "test": 300
+ },
+ "source": "data/ASSEBench/dataset/AgentJudge-safety.json (ASSEBench, arXiv 2506.00641, NeurIPS 2025; no official train/val/test split)",
+ "stratify_by": [
+  "application_scenario",
+  "label"
+ ],
+ "notes": [
+  "records stored verbatim + 'category' = normalized application_scenario",
+  "strict/loose are the same records (ids aligned) under two other annotation standards; join by id if needed",
+  "66 interactions shared with the security dimension get the same split assignment as there (no cross-dimension leakage)"
+ ]
+}
