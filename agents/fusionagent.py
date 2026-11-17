@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent import BaseAgent
+from llm_cache import cached_chain
 from prompts.base_prompts import (
     TOOL_SEARCH_PROMPT,
     TOOL_REUSE_PROMPT,
@@ -13,17 +14,25 @@ from prompts.base_prompts import (
 
 
 class ToolItem(BaseModel):
-    category: str
-    tool_name: str
-    tool_description: str = ""
-    require: List[str] = Field(default_factory=list)
-    tool_code: str = ""
-    if_match: Literal["yes", "no"] = "no"
-    match_tool_name: Optional[str] = None
+    category: str = Field(description="Risk category the tool protects against")
+    tool_name: str = Field(description="Function name in tool_code")
+    tool_description: str = Field(default="", description="What the tool detects and how")
+    require: List[str] = Field(default_factory=list, description="Python modules the code imports, e.g. ['re']")
+    tool_code: str = Field(default="", description="Python source of def <tool_name>(query: str, action: str) -> bool; True = risk detected")
+    if_match: Literal["yes", "no"] = Field(default="no", description='"yes" if a similar tool exists among the existing tools')
+    match_tool_name: Optional[str] = Field(default=None, description='Name of the matched existing tool; "" if none')
 
 
 class ToolBatch(BaseModel):
-    tools: List[ToolItem] = Field(default_factory=list)
+    tools: List[ToolItem] = Field(default_factory=list, description="Tools with their original fields")
+
+
+class ReusedTool(BaseModel):
+    category: str = Field(default="", description="Category of the existing tool; keep it unchanged")
+    tool_name: str = Field(default="", description="Function name in tool_code; keep the existing tool's name")
+    tool_description: str = Field(default="", description="What the tool detects and how")
+    require: List[str] = Field(default_factory=list, description="Python modules the code imports, e.g. ['re']")
+    tool_code: str = Field(default="", description="Python source of def <tool_name>(query: str, action: str) -> bool; True = risk detected")
 
 
 class ToolMemoryRepository:
@@ -51,10 +60,11 @@ class FusionAgent:
             ToolBatch, method="function_calling"
         )
         self.reuse_llm = self.agent.with_structured_output(
-            ToolBatch, method="function_calling"
+            ReusedTool, method="function_calling"
         )
-        self.search_chain = self.search_prompt | self.search_llm
-        self.reuse_chain = self.reuse_prompt | self.reuse_llm
+        # 落盘缓存包装
+        self.search_chain = cached_chain(self.search_prompt | self.search_llm, fusion_model, ToolBatch)
+        self.reuse_chain = cached_chain(self.reuse_prompt | self.reuse_llm, fusion_model, ReusedTool)
 
     def search_tool(self, tool_result: Dict[str, Any]) -> ToolBatch:
         if not tool_result.get("tools"):
@@ -108,5 +118,13 @@ class FusionAgent:
                     ),
                 }
             )
-            tool_workflow.append((optimized.model_dump(), True))
+            if optimized is None or not optimized.tool_code.strip():
+                # No usable rewrite: reuse the existing tool as stored.
+                reused = dict(matched_tool_info)
+            else:
+                reused = optimized.model_dump()
+            # The library update replaces the tool by (category, tool_name).
+            reused["category"] = category
+            reused["tool_name"] = reused.get("tool_name") or matched
+            tool_workflow.append((reused, True))
         return tool_workflow

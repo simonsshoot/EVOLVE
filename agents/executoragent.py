@@ -5,7 +5,9 @@ from typing import List, Dict, Any, Tuple, Literal, Optional
 from pydantic import BaseModel, Field
 
 from agents.agent import BaseAgent
+from agents.tool_runner import run_tool
 from container import Container
+from llm_cache import cached_chain
 from prompts.base_prompts import SANDBOX_ACTION_PROMPT, SANDBOX_TOOL_PROMPT
 
 from langchain.chat_models import init_chat_model
@@ -13,11 +15,13 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 class SandboxToolOutput(BaseModel):
-    result: Literal["True", "False"] = "False"
+    result: Literal["True", "False"] = Field(default="False", description='Simulated return value of the tool: "True" = risk detected')
+    reason: str = Field(default="", description="Why the tool returns this value")
 
 
 class SandboxActionOutput(BaseModel):
-    result: str = ""
+    result: str = Field(default="", description="Simulated output of the agent actions")
+    reason: str = Field(default="", description="Brief explanation of the simulated output")
 
 
 class AgentHarmToolSimOutput(BaseModel):
@@ -52,13 +56,20 @@ class ExecutorAgent(BaseAgent):
             ]
         )
 
-        self.sandbox_tool_chain = self.sandbox_tool_prompt | self.sandbox_tool_llm
-        self.sandbox_action_chain = self.sandbox_action_prompt | self.sandbox_action_llm
-        self.agentharm_tool_chain = (
+        # 落盘缓存包装：LLM 模拟（fallback 与动作模拟）的重复提示词命中缓存
+        self.sandbox_tool_chain = cached_chain(
+            self.sandbox_tool_prompt | self.sandbox_tool_llm, executor_model, SandboxToolOutput
+        )
+        self.sandbox_action_chain = cached_chain(
+            self.sandbox_action_prompt | self.sandbox_action_llm, executor_model, SandboxActionOutput
+        )
+        self.agentharm_tool_chain = cached_chain(
             self.agentharm_tool_prompt
             | self.llm.with_structured_output(
                 AgentHarmToolSimOutput, method="function_calling"
-            )
+            ),
+            executor_model,
+            AgentHarmToolSimOutput,
         )
 
     def _invoke_structured(
@@ -82,17 +93,47 @@ class ExecutorAgent(BaseAgent):
         execution_results: List[Tuple[Dict, bool, bool]] = []
 
         for tool_info, is_reused in tool_workflow:
-            result_obj = self.sandbox_tool_chain.invoke(
-                {
-                    "query": query,
-                    "action": action,
-                    "tool_info": json.dumps(tool_info, ensure_ascii=False, indent=2),
-                    "environment": data.get("init", ""),
-                }
+            # Run the tool code for real; the verdict is reproducible and costs no LLM call.
+            result, error = run_tool(
+                tool_info.get("tool_code", ""),
+                tool_info.get("tool_name", ""),
+                query,
+                action,
+                require=tool_info.get("require", []),
             )
-            execution_results.append(
-                (tool_info, is_reused, True if result_obj.result == "True" else False)
-            )
+            if result is not None:
+                self.logger.info(
+                    f"Sandbox tool {tool_info.get('tool_name', '')}: result={result}"
+                )
+            else:
+                # Real execution failed (syntax error, missing dependency, sandbox denial...).
+                # Fall back to LLM simulation so a tool that only lacks a dependency can still vote.
+                self.logger.warning(
+                    f"Sandbox tool {tool_info.get('tool_name', '')} real execution failed: {error}"
+                )
+                sim = self._invoke_structured(
+                    self.sandbox_tool_chain,
+                    {
+                        "query": query,
+                        "action": action,
+                        "tool_info": json.dumps(tool_info, ensure_ascii=False, indent=2),
+                        "environment": data.get("init", ""),
+                    },
+                    None,
+                    f"Failed to simulate tool {tool_info.get('tool_name', '')}",
+                )
+                # execution_error keeps the tool out of the library; simulated marks the verdict's origin.
+                tool_info = {**tool_info, "execution_error": error}
+                if sim is None:
+                    result = False
+                else:
+                    result = sim.result == "True"
+                    tool_info = {**tool_info, "simulated": True}
+                    self.logger.info(
+                        f"Sandbox tool {tool_info.get('tool_name', '')}: simulated result={result}"
+                        f" ({sim.reason})"
+                    )
+            execution_results.append((tool_info, is_reused, result))
         self.logger.info(f"Sandbox executed tools results: {execution_results}")
         return execution_results
 

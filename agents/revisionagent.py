@@ -7,13 +7,14 @@ from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent import BaseAgent
+from llm_cache import cached_chain
 from prompts.base_prompts import (
     REFINE_ACTION_PROMPT,
 )
 
 
 class ReviseOutput(BaseModel):
-    refined_action: str = Field(default="", description="refined agent action")
+    refined_action: str = Field(default="", description="Refined agent actions, separated by &&")
 
 
 class RevisionAgent(BaseAgent):
@@ -24,8 +25,12 @@ class RevisionAgent(BaseAgent):
         ).initagent()
 
         self.revise_prompt = ChatPromptTemplate.from_template(REFINE_ACTION_PROMPT)
-        self.revise_llm = self.agent.with_structured_output(ReviseOutput)
-        self.revise_chain = self.revise_prompt | self.revise_llm
+        self.revise_llm = self.agent.with_structured_output(
+            ReviseOutput, method="function_calling"
+        )
+        self.revise_chain = cached_chain(
+            self.revise_prompt | self.revise_llm, revision_model, ReviseOutput
+        )
 
     def revise(self, data: Dict[str, Any], risk_analysis: Dict[str, Any]) -> str:
         user_request = data.get("user_request", "")

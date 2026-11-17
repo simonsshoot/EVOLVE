@@ -10,12 +10,13 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from prompts.base_prompts import SIMULATE_AGENT_PROMPT
 from agent import BaseAgent
+from llm_cache import cached_chain
 
 
 class SimulateOutput(BaseModel):
-    agent_actions: str = Field(default="", description="simulate agent's actions")
+    agent_actions: str = Field(default="", description="Simulated agent actions: tool calls tool_name(params) and/or bash commands, joined by &&")
     environment: str = Field(
-        default="", description="simulate execution environment/context"
+        default="", description="Bash commands that initialize the execution environment; empty if none needed"
     )
 
 
@@ -30,7 +31,9 @@ class SimulateAgent(BaseAgent):
         self.simulate_llm = self.agent.with_structured_output(
             SimulateOutput, method="function_calling"
         )
-        self.simulate_chain = self.simulate_prompt | self.simulate_llm
+        self.simulate_chain = cached_chain(
+            self.simulate_prompt | self.simulate_llm, simulate_model, SimulateOutput
+        )
 
     def _format_tools(self, present_tools: Optional[List[Dict[str, Any]]]) -> str:
         if not present_tools:

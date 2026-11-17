@@ -33,3 +33,6 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# ─ LLM response cache ───────────────
+llm_cache/

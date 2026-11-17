@@ -1,38 +1,37 @@
 import json
-import time
 import argparse
-from functools import lru_cache
 from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent import BaseAgent
+from llm_cache import cached_chain
 from prompts.base_prompts import RISK_ANALYSIS_PROMPT, TOOL_PLAN_PROMPT
 from prompts.prompt_utils import compose_prompt, get_specific_prompt_supplement
 
 
 class RiskItem(BaseModel):
-    category: str = Field(default="")
-    description: str = Field(default="")
+    category: str = Field(default="", description="Risk category name")
+    description: str = Field(default="", description="Detailed description of the risk")
 
 
 class RiskAnalysisOutput(BaseModel):
-    risks: List[RiskItem] = Field(default_factory=list)
-    new_risks: Literal["yes", "no"] = "no"
-    need_tools: Literal["yes", "no"] = "no"
-    reason: str = ""
+    risks: List[RiskItem] = Field(default_factory=list, description="Identified risks; empty list if there is no real risk")
+    new_risks: Literal["yes", "no"] = Field(default="no", description='"yes" if any risk category is not among the existing categories')
+    need_tools: Literal["yes", "no"] = Field(default="no", description='"yes" only if security tools are needed for automated detection/protection')
+    reason: str = Field(default="", description="Why tools are or are not needed")
 
 
 class ToolSpec(BaseModel):
-    category: str = Field(default="")
-    tool_name: str = Field(default="")
-    tool_description: str = Field(default="")
-    require: List[str] = Field(default_factory=list)
-    tool_code: str = Field(default="")
+    category: str = Field(default="", description="Risk category the tool protects against")
+    tool_name: str = Field(default="", description="Must equal the function name in tool_code")
+    tool_description: str = Field(default="", description="What the tool detects and how")
+    require: List[str] = Field(default_factory=list, description="Python modules the code imports, e.g. ['re']")
+    tool_code: str = Field(default="", description="Python source of def <tool_name>(query: str, action: str) -> bool; True = risk detected")
 
 
 class ToolPlanOutput(BaseModel):
-    tools: List[ToolSpec] = Field(default_factory=list)
+    tools: List[ToolSpec] = Field(default_factory=list, description="Designed security tools")
 
 
 class AnalysisAgent(BaseAgent):
@@ -58,8 +57,9 @@ class AnalysisAgent(BaseAgent):
         self.tool_plan_llm = self.agent.with_structured_output(
             ToolPlanOutput, method="function_calling"
         )
-        self.risk_chain = self.risk_prompt | self.risk_llm
-        self.tool_plan_chain = self.tool_plan_prompt | self.tool_plan_llm
+        # 落盘缓存包装：重复样本/重跑时相同提示词直接命中缓存
+        self.risk_chain = cached_chain(self.risk_prompt | self.risk_llm, analysis_model, RiskAnalysisOutput)
+        self.tool_plan_chain = cached_chain(self.tool_plan_prompt | self.tool_plan_llm, analysis_model, ToolPlanOutput)
 
     def _load_risk_memory(self) -> Dict[str, Any]:
         with open(self.risk_memory_path, "r", encoding="utf-8") as f:
@@ -124,7 +124,6 @@ class AnalysisAgent(BaseAgent):
         need_tools = analysis_result.get("need_tools", "no")
 
         if need_tools == "yes":
-            time.sleep(1)
             tool_result = self.safetytool_definition(
                 risk=analysis_result.get("risks", []),
                 user_request=user_request,

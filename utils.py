@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 import argparse
@@ -543,6 +544,26 @@ def filter_by_id_prefix(input_file: str, output_file: str):
     )
 
 
+def atomic_write_json(path: str, obj: Any) -> None:
+    """Atomically write obj as JSON: dump to a temp file in the same directory, then rename.
+
+    A crash mid-write must never corrupt the lifelong library, so the target file is
+    only ever replaced by a complete rename (os.replace is atomic on POSIX and Windows).
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".evolve_tmp_", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def update_lifelong_library(
     args: argparse.Namespace,
     risk_analysis: Dict[str, Any],
@@ -578,8 +599,8 @@ def update_lifelong_library(
                 added_any = True
 
         if added_any:
-            with open(args.risk_memory, "w", encoding="utf-8") as f:
-                json.dump(risk_library, f, indent=2, ensure_ascii=False)
+            # 原子写：中途崩溃不会损坏风险库
+            atomic_write_json(args.risk_memory, risk_library)
     except Exception as e:
         logger.error(f"Failed to update risk library: {str(e)}")
 
@@ -596,6 +617,10 @@ def update_lifelong_library(
 
             tool_name = tool_info.get("tool_name")
             if not tool_name:
+                continue
+
+            # 真实执行出错（语法错误、异常、超时、越权操作、返回值非 bool）的工具不入库
+            if tool_info.get("execution_error"):
                 continue
 
             # 是否经历过“第一次判 risky -> 自动优化”流程
@@ -645,8 +670,8 @@ def update_lifelong_library(
                     updated = True
 
         if updated:
-            with open(args.tool_memory, "w", encoding="utf-8") as f:
-                json.dump(tool_library, f, indent=2, ensure_ascii=False)
+            # 原子写：中途崩溃不会损坏工具库
+            atomic_write_json(args.tool_memory, tool_library)
             logger.info("Tool library updated successfully")
 
     except Exception as e:

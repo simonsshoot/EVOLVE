@@ -20,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from configs import setup_logger
+from llm_cache import configure as configure_llm_cache
 from agents.agent_utils import normalize_is_safe
 from utils import (
     data_wrapper,
@@ -128,23 +129,24 @@ def print_stats(
     # 仅对有有效 label 的样本计算准确率和误判
     labeled_df = df[df["label"].notna() & df["label"].isin([0, 1])]
 
-    # 误判指：benign(label=1)被判为unsafe
+    # 正类为 safe（benign, label=1），与 DEFEND/comparison 中的基线口径一致
+    # 误判指：benign(label=1)被判为unsafe -> FN
     misjudge_benign = len(
         labeled_df[(labeled_df["label"] == 1) & (labeled_df["decision"] == "unsafe")]
     )
     fn = misjudge_benign
-    # 误判指：harmful(label=0)被判为safe
+    # 漏判指：harmful(label=0)被判为safe -> FP
     misjudge_harmful = len(
         labeled_df[(labeled_df["label"] == 0) & (labeled_df["decision"] == "safe")]
     )
     fp = misjudge_harmful
-    tn = len(
+    tp = len(
         labeled_df[(labeled_df["label"] == 1) & (labeled_df["decision"] == "safe")]
     )
-    tp = len(
+    tn = len(
         labeled_df[(labeled_df["label"] == 0) & (labeled_df["decision"] == "unsafe")]
     )
-    # 正确分类数：harmful判为unsafe + benign判为safe
+    # 正确分类数：benign判为safe + harmful判为unsafe
     correct_count = tn + tp
 
     # valid_total: 有 label 且非 error 的样本数
@@ -231,6 +233,45 @@ def print_stats(
         "FP": fp,
     }
     return metrics
+
+
+def build_decision_trace(
+    auditoragent,
+    doubt_tool_result: List[Tuple[Dict, Dict, bool, bool, int]],
+    decision: str,
+    final_result: str,
+) -> Dict[str, Any]:
+    """结果表溯源列：判定来源、命中工具（真实执行 / LLM 模拟）、每个工具的质疑结论。"""
+    tools = []
+    for tool_info, doubt_result, is_reused, execution_result, tool_has_risk in doubt_tool_result:
+        tools.append(
+            {
+                "tool_name": tool_info.get("tool_name", ""),
+                "category": tool_info.get("category", ""),
+                "is_reused": is_reused,
+                "execution_result": execution_result,
+                "simulated": bool(tool_info.get("simulated", False)),
+                "execution_error": tool_info.get("execution_error", ""),
+                "optimized": bool(tool_has_risk),
+                "doubt_is_safe": doubt_result.get("is_safe", ""),
+                "doubt_llm_failed": bool(doubt_result.get("llm_failed", False)),
+                "doubt_reason": doubt_result.get("reason", ""),
+            }
+        )
+    return {
+        "decision": decision,
+        "verdict_failed": bool(getattr(auditoragent, "verdict_failed", False)),
+        "decision_source": getattr(auditoragent, "decision_source", ""),
+        "final_decision_reason": getattr(auditoragent, "final_decision_reason", ""),
+        "hit_tools": [t["tool_name"] for t in tools if t["execution_result"] is True],
+        "simulated_hits": [
+            t["tool_name"]
+            for t in tools
+            if t["execution_result"] is True and t["simulated"]
+        ],
+        "tools": tools,
+        "action_result": final_result,
+    }
 
 
 def restart(result_path: str, tool_memory: str, risk_memory: str, dataset: str):
@@ -323,11 +364,14 @@ def pipeline(args: argparse.Namespace, data: Dict[str, Any]) -> Tuple[
                 tool_workflow.append((tool, False))
 
     # Step 4: ExecutorAgent - 工具执行与反馈
+    executoragent = ExecutorAgent(args.executor_model)
+    # 工具在本地子进程中真实执行；子进程跑不了（如缺依赖）时退回 LLM 模拟执行。
+    # 单个工具出错只记 execution_error，不抛异常；放在下面的 try 之外：
+    # LLM 动作模拟失败时不应丢掉真实的工具结果
+    feedback = executoragent.sandbox_execute_tool(
+        tool_workflow, tarvodata, present_tools, args.dataset
+    )
     try:
-        executoragent = ExecutorAgent(args.executor_model)
-        feedback = executoragent.sandbox_execute_tool(
-            tool_workflow, tarvodata, present_tools, args.dataset
-        )
         agent_action_result = executoragent.sandbox_execute_action(
             tarvodata, present_tools, args.dataset
         )
@@ -336,9 +380,6 @@ def pipeline(args: argparse.Namespace, data: Dict[str, Any]) -> Tuple[
         logger.warning(
             f"ExecutorAgent failed, fallback to static action result: {str(e)}"
         )
-        feedback = [
-            (tool_info, is_reused, False) for tool_info, is_reused in tool_workflow
-        ]
         final_result = tarvodata.get("agent_actions", "")
 
     # Step 5: AuditorAgent - 工具质疑和最终决策
@@ -363,7 +404,17 @@ def pipeline(args: argparse.Namespace, data: Dict[str, Any]) -> Tuple[
         args.debug_decision_path,
     )
 
-    decision = "unsafe" if is_unsafe else "safe"
+    if auditoragent.verdict_failed:
+        # 判 unsafe 只因审计 LLM 调用失败：记为 error，不计入指标，避免抬高 benign 误判
+        logger.warning("AuditorAgent verdict call failed, sample recorded as error")
+        decision = "error"
+    else:
+        decision = "unsafe" if is_unsafe else "safe"
+
+    # 结果表溯源：判定来源、命中工具、质疑结论
+    tarvodata["decision_trace"] = build_decision_trace(
+        auditoragent, doubt_tool_result, decision, final_result
+    )
 
     return tool_set, decision, risk_analysis, doubt_tool_result, tarvodata, final_result
 
@@ -371,6 +422,11 @@ def pipeline(args: argparse.Namespace, data: Dict[str, Any]) -> Tuple[
 def run(args: argparse.Namespace):
     random.seed(args.seed)
     np.random.seed(args.seed)
+    # 结构化 LLM 调用落盘缓存（temperature=0，重复提示词直接命中）
+    configure_llm_cache(
+        cache_dir=getattr(args, "llm_cache_dir", None),
+        enabled=not getattr(args, "disable_llm_cache", False),
+    )
     # ----------------- merged splits support -----------------
     data, dataset_name = data_reader(args)
     args.dataset = dataset_name
@@ -385,6 +441,7 @@ def run(args: argparse.Namespace):
             "generated_tools": [None] * len(data),
             "decision": [None] * len(data),
             "risk_detected": [None] * len(data),
+            "decision_trace": [None] * len(data),
         }
     )
 
@@ -401,6 +458,9 @@ def run(args: argparse.Namespace):
     if os.path.exists(result_path):
         existing_df = pd.read_csv(result_path)
         df = existing_df
+        # 旧结果文件没有 decision_trace 列：补一列空值，断点续跑不会因缺列报错
+        if "decision_trace" not in df.columns:
+            df["decision_trace"] = None
 
     if not os.path.exists(args.risk_memory):
         os.makedirs(os.path.dirname(args.risk_memory), exist_ok=True)
@@ -548,8 +608,10 @@ def run(args: argparse.Namespace):
                         final_risky_tools += 1
                         fail_count += 1
                 else:
-                    # 未优化：第一次质疑就安全 -> 会入库
-                    if normalize_is_safe(doubt_result.get("is_safe", "")) is True:
+                    # 未优化：第一次质疑就安全且能真实运行 -> 会入库
+                    if normalize_is_safe(
+                        doubt_result.get("is_safe", "")
+                    ) is True and not tool_info.get("execution_error"):
                         added_to_library += 1
                         if is_reused:
                             added_reused += 1
@@ -582,6 +644,9 @@ def run(args: argparse.Namespace):
             df.at[index, "generated_tools"] = json.dumps(tool_set, ensure_ascii=False)
             df.at[index, "decision"] = decision
             df.at[index, "risk_detected"] = 1 if need_tools == "yes" else 0
+            df.at[index, "decision_trace"] = json.dumps(
+                tarvodata.get("decision_trace", {}), ensure_ascii=False
+            )
 
             if label_val is not None:
                 save_misjudged_case(
@@ -605,6 +670,9 @@ def run(args: argparse.Namespace):
             traceback.print_exc()
             df.at[index, "decision"] = "error"
             df.at[index, "risk_detected"] = -1
+            df.at[index, "decision_trace"] = json.dumps(
+                {"decision": "error", "error": str(e)}, ensure_ascii=False
+            )
             df.to_csv(result_path, index=False)
             continue
 
@@ -697,6 +765,17 @@ if __name__ == "__main__":
         "--refine_action",
         action="store_true",
         help="Enable refine action after final decision.",
+    )
+    parser.add_argument(
+        "--llm_cache_dir",
+        type=str,
+        default="llm_cache",
+        help="Directory for the structured-LLM-call disk cache (temperature 0 makes repeats reproducible).",
+    )
+    parser.add_argument(
+        "--disable_llm_cache",
+        action="store_true",
+        help="Disable the LLM response cache; every call goes to the API.",
     )
 
     args = parser.parse_args()
